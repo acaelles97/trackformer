@@ -31,6 +31,7 @@ ex.add_named_config('mots20', 'cfgs/train_mots20.yaml')
 ex.add_named_config('coco_person_masks', 'cfgs/train_coco_person_masks.yaml')
 ex.add_named_config('full_res', 'cfgs/train_full_res.yaml')
 ex.add_named_config('focal_loss', 'cfgs/train_focal_loss.yaml')
+ex.add_named_config('inst_segm', '/usr/prakt/p028/projects/TrackFormer/TrackFormer/cfgs/train_coco_inst_segmentation.yaml')
 
 
 @ex.capture

@@ -58,6 +58,10 @@ track_query_noise: 0.0
 track_attention: false
 # Segmentation
 masks: false
+inst_segm: false
+top_k_inference: 100
+encode_references: false
+attention_map_lvl: 1
 # Matcher
 # Class coefficient in the matching cost
 set_cost_class: 1.0

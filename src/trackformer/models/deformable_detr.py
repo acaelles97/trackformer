@@ -214,7 +214,7 @@ class DeformableDETR(DETR):
         # memory = memory_slices[-1]
         # features = [NestedTensor(memory_slide) for memory_slide in memory_slices]
 
-        return out, targets, features_all, memory, hs
+        return out, targets, features_all, memory, hs, srcs, masks, inter_references
 
     @torch.jit.unused
     def _set_aux_loss(self, outputs_class, outputs_coord):

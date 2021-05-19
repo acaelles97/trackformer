@@ -11,6 +11,7 @@ from .detr_segmentation import (DeformableDETRSegm, DeformableDETRSegmTracking,
 from .detr_tracking import DeformableDETRTracking, DETRTracking
 from .matcher import build_matcher
 from .transformer import build_transformer
+from .inst_segm_deformable_detr import DefDETRInstanceSegTopK, InstSegmBoxPostProcess, InstSegmMaskPostProcess
 
 
 def build_model(args):
@@ -40,7 +41,11 @@ def build_model(args):
         'matcher': matcher,}
 
     mask_kwargs = {
-        'freeze_detr': args.freeze_detr}
+        'freeze_detr': args.freeze_detr,
+        'top_k_predictions': args.top_k_inference,
+        'encode_references': args.encode_references,
+        'attention_map_lvl': args.attention_map_lvl,
+        'matcher': matcher, }
 
     if args.deformable:
         transformer = build_deforamble_transformer(args)
@@ -56,7 +61,9 @@ def build_model(args):
             else:
                 model = DeformableDETRTracking(tracking_kwargs, detr_kwargs)
         else:
-            if args.masks:
+            if args.inst_segm:
+                model = DefDETRInstanceSegTopK(mask_kwargs, detr_kwargs)
+            elif args.masks:
                 model = DeformableDETRSegm(mask_kwargs, detr_kwargs)
             else:
                 model = DeformableDETR(**detr_kwargs)
@@ -104,7 +111,9 @@ def build_model(args):
         losses=losses,
         track_query_false_positive_eos_weight=args.track_query_false_positive_eos_weight,
         focal_loss=args.focal_loss,
-        focal_alpha=args.focal_alpha)
+        focal_alpha=args.focal_alpha,
+        inst_segm=args.inst_segm)
+
     criterion.to(device)
 
     if args.focal_loss:
@@ -112,9 +121,14 @@ def build_model(args):
     else:
         postprocessors = {'bbox': PostProcess()}
     if args.masks:
-        postprocessors['segm'] = PostProcessSegm()
-        if args.dataset == "coco_panoptic":
-            is_thing_map = {i: i <= 90 for i in range(201)}
-            postprocessors["panoptic"] = PostProcessPanoptic(is_thing_map, threshold=0.85)
+        if args.inst_segm:
+            # Overwrite bbox post processor
+            postprocessors = {'bbox': InstSegmBoxPostProcess(top_k_predictions=args.top_k_inference),
+                              'segm': InstSegmMaskPostProcess(top_k_predictions=args.top_k_inference)}
+        else:
+            postprocessors['segm'] = PostProcessSegm()
+            if args.dataset == "coco_panoptic":
+                is_thing_map = {i: i <= 90 for i in range(201)}
+                postprocessors["panoptic"] = PostProcessPanoptic(is_thing_map, threshold=0.85)
 
     return model, criterion, postprocessors
