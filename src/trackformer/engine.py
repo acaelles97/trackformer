@@ -80,7 +80,6 @@ def make_results(outputs, targets, postprocessors, tracking, return_only_orig=Tr
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module, postprocessors,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, visualizers: dict, args):
-
     vis_iter_metrics = None
     if visualizers:
         vis_iter_metrics = visualizers['iter_metrics']
@@ -96,15 +95,18 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module, postproc
     metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
 
     for i, (samples, targets) in enumerate(metric_logger.log_every(data_loader, epoch)):
+        # for i, (samples, targets) in enumerate(data_loader):
+        #     empty = [t["boxes"].shape[0] == 0 for t in targets]
+        #     if not all(empty):
+        #         continue
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-
         # in order to be able to modify targets inside the forward call we need
         # to pass it through as torch.nn.parallel.DistributedDataParallel only
         # passes copies
-
+        generate_predictions = bool(visualizers and (i == 0 or not i % args.vis_and_log_interval))
+        targets[0]["generate_predictions"] = torch.tensor(generate_predictions, device=device)
         outputs, targets, *_ = model(samples, targets)
-
         loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
@@ -137,7 +139,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module, postproc
         metric_logger.update(lr=optimizer.param_groups[0]["lr"],
                              lr_backbone=optimizer.param_groups[1]["lr"])
 
-        if visualizers and (i == 0 or not i % args.vis_and_log_interval):
+        if generate_predictions:
             _, results = make_results(
                 outputs, targets, postprocessors, args.tracking, return_only_orig=False)
 
@@ -183,7 +185,7 @@ def evaluate(model, criterion, postprocessors, data_loader, device,
     for i, (samples, targets) in enumerate(metric_logger.log_every(data_loader, 'Test:')):
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-
+        targets[0]["generate_predictions"] = torch.tensor(True, device=device)
         outputs, targets, *_ = model(samples, targets)
 
         loss_dict = criterion(outputs, targets)

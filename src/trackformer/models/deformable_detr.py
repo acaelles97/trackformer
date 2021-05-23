@@ -165,7 +165,7 @@ class DeformableDETR(DETR):
         query_embeds = None
         if not self.two_stage:
             query_embeds = self.query_embed.weight
-        hs, memory, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact = \
+        hs, memory, init_reference, inter_references, query_embed, enc_outputs_class, enc_outputs_coord_unact = \
             self.transformer(srcs, masks, pos, query_embeds, targets)
 
         outputs_classes = []
@@ -214,7 +214,7 @@ class DeformableDETR(DETR):
         # memory = memory_slices[-1]
         # features = [NestedTensor(memory_slide) for memory_slide in memory_slices]
 
-        return out, targets, features_all, memory, hs, srcs, masks, inter_references
+        return out, targets, features_all, memory, hs, srcs, pos, masks, inter_references, query_embed
 
     @torch.jit.unused
     def _set_aux_loss(self, outputs_class, outputs_coord):

@@ -15,10 +15,11 @@ import train
 from trackformer.util.misc import nested_dict_to_namespace
 
 WORK_DIR = str(Path(__file__).parent.absolute())
+root_dir = str(Path(__file__).resolve().parent.parent)
 
 
 ex = sacred.Experiment('submit', ingredients=[train.ex])
-ex.add_config('cfgs/submit.yaml')
+ex.add_config(root_dir + '/cfgs/submit.yaml')
 
 
 def get_shared_folder() -> Path:
@@ -90,6 +91,7 @@ def main(args: Namespace):
 
     # cluster setup is defined by environment variables
     num_gpus_per_node = args.num_gpus
+    num_cpus_per_task = args.cpus_per_task
     nodes = args.nodes
     timeout_min = args.timeout
 
@@ -102,7 +104,7 @@ def main(args: Namespace):
         mem_gb=args.mem_per_gpu * num_gpus_per_node,
         # gpus_per_node=num_gpus_per_node,
         tasks_per_node=num_gpus_per_node,  # one task per GPU
-        cpus_per_task=2,
+        cpus_per_task=num_cpus_per_task,
         nodes=nodes,
         timeout_min=timeout_min,  # max is 60 * 72,
         slurm_partition=args.slurm_partition,
@@ -112,7 +114,7 @@ def main(args: Namespace):
         slurm_gres=slurm_gres
     )
 
-    executor.update_parameters(name="fair_track")
+    executor.update_parameters(name="Inst Segm Trackforemr")
 
     args.train.dist_url = get_init_file().as_uri()
     # args.output_dir = args.job_dir
@@ -129,7 +131,7 @@ def main(args: Namespace):
 @ex.main
 def load_config(_config, _run):
     """ We use sacred only for config loading from YAML files. """
-    sacred.commands.print_config(_run)
+    # sacred.commands.print_config(_run)
 
 
 if __name__ == '__main__':

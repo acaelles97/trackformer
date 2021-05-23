@@ -18,12 +18,14 @@ from trackformer.models.tracker import Tracker
 from trackformer.util.misc import nested_dict_to_namespace
 from trackformer.util.track_utils import (evaluate_mot_accums, get_mot_accum,
                                           interpolate_tracks, plot_sequence)
+from pathlib import Path
 
 mm.lap.default_solver = 'lap'
 
 ex = sacred.Experiment('track')
-ex.add_config('cfgs/track.yaml')
-ex.add_named_config('reid', 'cfgs/track_reid.yaml')
+root_dir = str(Path(__file__).resolve().parent.parent)
+ex.add_config(root_dir + '/cfgs/track.yaml')
+ex.add_named_config('reid', root_dir + '/cfgs/track_reid.yaml')
 
 
 @ex.automain

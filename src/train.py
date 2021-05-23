@@ -20,18 +20,20 @@ from trackformer.util.misc import nested_dict_to_namespace
 from trackformer.util.plot_utils import get_vis_win_names
 from trackformer.vis import build_visualizers
 
+
+root_dir = str(Path(__file__).resolve().parent.parent)
 ex = sacred.Experiment('train')
-ex.add_config('cfgs/train.yaml')
-ex.add_named_config('deformable', 'cfgs/train_deformable.yaml')
-ex.add_named_config('tracking', 'cfgs/train_tracking.yaml')
-ex.add_named_config('crowdhuman', 'cfgs/train_crowdhuman.yaml')
-ex.add_named_config('mot17', 'cfgs/train_mot17.yaml')
-ex.add_named_config('mot17_cross_val', 'cfgs/train_mot17_cross_val.yaml')
-ex.add_named_config('mots20', 'cfgs/train_mots20.yaml')
-ex.add_named_config('coco_person_masks', 'cfgs/train_coco_person_masks.yaml')
-ex.add_named_config('full_res', 'cfgs/train_full_res.yaml')
-ex.add_named_config('focal_loss', 'cfgs/train_focal_loss.yaml')
-ex.add_named_config('inst_segm', '/usr/prakt/p028/projects/TrackFormer/TrackFormer/cfgs/train_coco_inst_segmentation.yaml')
+ex.add_config(root_dir + '/cfgs/train.yaml')
+ex.add_named_config('deformable', root_dir + '/cfgs/train_deformable.yaml')
+ex.add_named_config('tracking', root_dir + '/cfgs/train_tracking.yaml')
+ex.add_named_config('crowdhuman', root_dir + '/cfgs/train_crowdhuman.yaml')
+ex.add_named_config('mot17', root_dir + '/cfgs/train_mot17.yaml')
+ex.add_named_config('mot17_cross_val', root_dir + '/cfgs/train_mot17_cross_val.yaml')
+ex.add_named_config('mots20', root_dir + '/cfgs/train_mots20.yaml')
+ex.add_named_config('coco_person_masks', root_dir + '/cfgs/train_coco_person_masks.yaml')
+ex.add_named_config('full_res', root_dir + '/cfgs/train_full_res.yaml')
+ex.add_named_config('focal_loss', root_dir + '/cfgs/train_focal_loss.yaml')
+ex.add_named_config('inst_segmentation', root_dir + '/cfgs/train_coco_inst_segmentation.yaml')
 
 
 @ex.capture
@@ -328,6 +330,6 @@ def train(args: Namespace) -> None:
 @ex.automain
 def main(_config: dict, _run: sacred.run) -> None:
     # TODO: hierachical Namespacing for nested dict
-    sacred.commands.print_config(_run)
+    # sacred.commands.print_config(_run)
     args = nested_dict_to_namespace(_config)
     train(args)

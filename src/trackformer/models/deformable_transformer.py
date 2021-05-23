@@ -205,9 +205,9 @@ class DeformableTransformer(nn.Module):
         # print([m.shape for m in memory_slices])
 
         if self.two_stage:
-            return (hs, memory, init_reference_out, inter_references_out,
+            return (hs, memory, init_reference_out, inter_references_out, query_embed,
                     enc_outputs_class, enc_outputs_coord_unact)
-        return hs, memory, init_reference_out, inter_references_out, None, None
+        return hs, memory, init_reference_out, inter_references_out, query_embed, None, None
 
 
 class DeformableTransformerEncoderLayer(nn.Module):

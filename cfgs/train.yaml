@@ -60,7 +60,8 @@ track_attention: false
 masks: false
 inst_segm: false
 top_k_inference: 100
-encode_references: false
+fill_batch: false
+batch_mode: false
 attention_map_lvl: 1
 # Matcher
 # Class coefficient in the matching cost

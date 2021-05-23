@@ -1,6 +1,7 @@
 # Number of gpus to request on each node
 num_gpus: 1
 vram: 12GB
+cpus_per_task: 2
 # memory allocated per GPU in GB
 mem_per_gpu: 20
 # Number of nodes to request

@@ -11,7 +11,7 @@ from .detr_segmentation import (DeformableDETRSegm, DeformableDETRSegmTracking,
 from .detr_tracking import DeformableDETRTracking, DETRTracking
 from .matcher import build_matcher
 from .transformer import build_transformer
-from .inst_segm_deformable_detr import DefDETRInstanceSegTopK, InstSegmBoxPostProcess, InstSegmMaskPostProcess
+from .inst_segm_deformable_detr import build_instance_segm_model, InstSegmBoxPostProcess, InstSegmMaskPostProcess
 
 
 def build_model(args):
@@ -43,7 +43,8 @@ def build_model(args):
     mask_kwargs = {
         'freeze_detr': args.freeze_detr,
         'top_k_predictions': args.top_k_inference,
-        'encode_references': args.encode_references,
+        'fill_batch': args.fill_batch,
+        'batch_mode': args.batch_mode,
         'attention_map_lvl': args.attention_map_lvl,
         'matcher': matcher, }
 
@@ -62,7 +63,7 @@ def build_model(args):
                 model = DeformableDETRTracking(tracking_kwargs, detr_kwargs)
         else:
             if args.inst_segm:
-                model = DefDETRInstanceSegTopK(mask_kwargs, detr_kwargs)
+                model = build_instance_segm_model(args.inst_segm, mask_kwargs, detr_kwargs)
             elif args.masks:
                 model = DeformableDETRSegm(mask_kwargs, detr_kwargs)
             else:
@@ -111,8 +112,7 @@ def build_model(args):
         losses=losses,
         track_query_false_positive_eos_weight=args.track_query_false_positive_eos_weight,
         focal_loss=args.focal_loss,
-        focal_alpha=args.focal_alpha,
-        inst_segm=args.inst_segm)
+        focal_alpha=args.focal_alpha)
 
     criterion.to(device)
 
