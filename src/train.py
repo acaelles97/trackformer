@@ -200,7 +200,7 @@ def train(args: Namespace) -> None:
 
                 print(f"Load {k} {tuple(v.shape)} from resume model "
                       f"{tuple(checkpoint_value.shape)}.")
-            elif args.focal_loss and 'class_embed' in k:
+            elif args.focal_loss and 'class_embed' in k and not args.eval_only:
                 checkpoint_value = checkpoint_state_dict[k]
                 # no-object class
                 resume_value = checkpoint_value.clone()

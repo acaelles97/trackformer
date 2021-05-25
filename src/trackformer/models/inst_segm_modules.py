@@ -42,6 +42,8 @@ class InstanceSegmentationSumBatchMaskHead(nn.Module):
 
         # H/64 W/64
         self.lvl0_conv = SingleLevelMaskHeadConv(dim, conv_inter_dim)
+
+
         # H/32 W/32
         self.lvl1_conv = SingleLevelMaskHeadConv(dim, conv_inter_dim)
 
@@ -291,16 +293,17 @@ class InstanceSegmDefaultMaskHead(nn.Module):
     def forward(self, compressed_backbone_feats, bbox_mask, fpn_feat, instances_per_batch, level):
 
         def expand_multi_length(tensor, lengths):
-            tensors = []
-            for idx, length_to_repeat in enumerate(lengths):
-                tensors.append(tensor[idx].unsqueeze(0).repeat(1, int(length_to_repeat), 1, 1, 1).flatten(0, 1))
-            return torch.cat(tensors, dim=0)
-
-        # Cat batch axis
-        bbox_mask = torch.cat(bbox_mask, dim=1)
+            if isinstance(lengths, list):
+                tensors = []
+                for idx, length_to_repeat in enumerate(lengths):
+                    tensors.append(tensor[idx].unsqueeze(0).repeat(1, int(length_to_repeat), 1, 1, 1).flatten(0, 1))
+                return torch.cat(tensors, dim=0)
+            else:
+                return tensor.unsqueeze(1).repeat(1, int(lengths), 1, 1, 1).flatten(0, 1)
 
         # H/32 W/32
-        x = torch.cat([expand_multi_length(compressed_backbone_feats[level], instances_per_batch), bbox_mask.squeeze(0)], 1)
+        expanded_feats = expand_multi_length(compressed_backbone_feats[level], instances_per_batch)
+        x = torch.cat([expanded_feats, bbox_mask], 1)
         x = self.lay1(x)
         x = self.gn1(x)
         x = F.relu(x)

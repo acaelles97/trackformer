@@ -58,7 +58,7 @@ track_query_noise: 0.0
 track_attention: false
 # Segmentation
 masks: false
-inst_segm: false
+inst_segm: null
 top_k_inference: 100
 fill_batch: false
 batch_mode: false
