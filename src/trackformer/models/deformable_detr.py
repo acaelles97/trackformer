@@ -30,6 +30,7 @@ def _get_clones(module, N):
 
 class DeformableDETR(DETR):
     """ This is the Deformable DETR module that performs object detection """
+
     def __init__(self, backbone, transformer, num_classes, num_queries, num_feature_levels,
                  aux_loss=True, with_box_refine=False, two_stage=False):
         """ Initializes the model.
@@ -242,21 +243,29 @@ class DeformablePostProcess(PostProcess):
         assert len(out_logits) == len(target_sizes)
         assert target_sizes.shape[1] == 2
 
-        prob = out_logits.sigmoid()
+        if "top_k_indexes" in outputs:
+            top_k_indexes = outputs["top_k_indexes"]
+            scores = outputs["top_k_values"]
 
-        ###
-        # topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), 100, dim=1)
-        # scores = topk_values
+            topk_boxes = top_k_indexes // out_logits.shape[2]
+            labels = top_k_indexes % out_logits.shape[2]
+            boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
+            boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1, 1, 4))
 
-        # topk_boxes = topk_indexes // out_logits.shape[2]
-        # labels = topk_indexes % out_logits.shape[2]
+        else:
+            prob = out_logits.sigmoid()
+            ###
+            # topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), 100, dim=1)
+            # scores = topk_values
 
-        # boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
-        # boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))
-        ###
+            # topk_boxes = topk_indexes // out_logits.shape[2]
+            # labels = topk_indexes % out_logits.shape[2]
 
-        scores, labels = prob.max(-1)
-        boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
+            # boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
+            # boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))
+            ###
+            scores, labels = prob.max(-1)
+            boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
 
         # and from relative [0, 1] to absolute [0, height] coordinates
         img_h, img_w = target_sizes.unbind(1)

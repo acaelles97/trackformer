@@ -1,65 +1,58 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .detr_segmentation import expand_multi_length
 
 
-class SingleLevelMaskHeadConv(nn.Module):
-    def __init__(self, dim, inter_dim):
+class SingleLevelMaskHeadLayer(nn.Module):
+    def __init__(self, dim_in, dim_out):
         super().__init__()
         self.layer = torch.nn.Sequential(
-            torch.nn.Conv2d(dim, dim, 3, padding=1),
-            torch.nn.GroupNorm(8, dim),
-            torch.nn.Conv2d(dim, inter_dim, 3, padding=1),
-            torch.nn.GroupNorm(8, inter_dim),
+            torch.nn.Conv2d(dim_in, dim_out, 3, padding=1),
+            torch.nn.GroupNorm(8, dim_out),
         )
 
     def forward(self, x):
-        x = self.layer(x)
-        return F.relu(x)
+        return F.relu(self.layer(x))
 
 
-class SingleLevelSimpleMaskHeadConv(nn.Module):
-    def __init__(self, dim, inter_dim):
-        super().__init__()
-        self.layer = torch.nn.Sequential(
-            torch.nn.Conv2d(dim, inter_dim, 3, padding=1),
-            torch.nn.GroupNorm(8, inter_dim),
-        )
-
-    def forward(self, x):
-        x = self.layer(x)
-        return F.relu(x)
-
-
-class InstanceSegmentationSumBatchMaskHead(nn.Module):
+class InstanceSegmSumBatchMaskHead(nn.Module):
     """
     Simple convolutional head, using group norm.
     Upsampling is done using a FPN approach
     """
 
-    def __init__(self, dim, fpn_dims, conv_inter_dim):
+    def __init__(self, dim, fpn_dims, context_dim):
         super().__init__()
+        inter_dims = [
+            dim,
+            context_dim // 2,
+            context_dim // 4,
+            context_dim // 8,
+            context_dim // 16,
+            context_dim // 64]
 
         # H/64 W/64
-        self.lvl0_conv = SingleLevelMaskHeadConv(dim, conv_inter_dim)
-
+        self.lvl0_conv1 = SingleLevelMaskHeadLayer(dim, dim)
+        self.lvl0_conv2 = SingleLevelMaskHeadLayer(dim, inter_dims[1])
 
         # H/32 W/32
-        self.lvl1_conv = SingleLevelMaskHeadConv(dim, conv_inter_dim)
+        self.lvl1_conv = SingleLevelMaskHeadLayer(dim, inter_dims[1])
+        self.lvl1_merge = SingleLevelMaskHeadLayer(inter_dims[1], inter_dims[1])
 
         # H/16 W/16
-        self.lvl2_conv = SingleLevelMaskHeadConv(dim, conv_inter_dim)
-        self.lvl2_ch_reduction = torch.nn.Conv2d(conv_inter_dim, conv_inter_dim // 2, 1)
+        self.lvl2_conv = SingleLevelMaskHeadLayer(dim, inter_dims[1])
+        self.lvl2_merge = SingleLevelMaskHeadLayer(inter_dims[1], inter_dims[2])
 
         # H/8 W/8
-        self.lvl3_conv = SingleLevelMaskHeadConv(dim, conv_inter_dim // 2)
+        self.lvl3_conv = SingleLevelMaskHeadLayer(dim, inter_dims[2])
+        self.lvl3_merge = SingleLevelMaskHeadLayer(inter_dims[2], inter_dims[3])
 
         # H/4 W/4
-        self.merge_conv = SingleLevelMaskHeadConv(conv_inter_dim // 2, conv_inter_dim // 4)
-        self.out_lay = torch.nn.Conv2d(conv_inter_dim // 4, 1, 3, padding=1)
+        self.lvl4_merge = SingleLevelMaskHeadLayer(inter_dims[3], inter_dims[4])
+        self.out_lay = torch.nn.Conv2d(inter_dims[4], 1, 3, padding=1)
 
-        self.adapter_fpn = torch.nn.Conv2d(fpn_dims[-1], conv_inter_dim // 2, 1)
-
+        self.adapter_fpn = torch.nn.Conv2d(fpn_dims[2], inter_dims[3], 1)
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_uniform_(m.weight, a=1)
@@ -67,64 +60,47 @@ class InstanceSegmentationSumBatchMaskHead(nn.Module):
 
     # x -> compressed ch backbone feats bbox_masks -> attention maps computed at each level fpn_feat -> Highest spatial res feature from the
     # backbone that in this case is not use by the transformer encoder, so we need to reduce channels
-    def forward(self, compressed_backbone_feats, bbox_mask, features, instances_per_batch, expand_multi=True):
-
-        def expand_multi_length(tensor, lengths):
-            tensors = []
-            for idx, length_to_repeat in enumerate(lengths):
-                tensors.append(tensor[idx].unsqueeze(0).repeat(1, int(length_to_repeat), 1, 1, 1).flatten(0, 1))
-
-            return torch.cat(tensors, dim=0)
-
-        def expand_single_length(tensor, length):
-            if isinstance(length, list):
-                length = length[0]
-            return tensor.unsqueeze(1).repeat(1, int(length), 1, 1, 1).flatten(0, 1)
-
-        if expand_multi:
-            expand = expand_multi_length
-        else:
-            expand = expand_single_length
+    def forward(self, compressed_backbone_feats, bbox_mask, features, instances_per_batch):
 
         # H/64 W/64
-        level_bbox_masks = torch.cat([bbx[0] for bbx in bbox_mask], dim=1)
-        x_0 = torch.cat([expand(compressed_backbone_feats[0], instances_per_batch), level_bbox_masks.flatten(0, 1)], 1)
-        x_0 = self.lvl0_conv(x_0)
+        # level_bbox_masks = torch.cat([bbx[0] for bbx in bbox_mask], dim=1)
+        x_0 = torch.cat([expand_multi_length(compressed_backbone_feats[0], instances_per_batch), bbox_mask[0]], 1)
+        x_0 = self.lvl0_conv1(x_0)
+        x_0 = self.lvl0_conv2(x_0)
 
         # H/32 W/32
-        level_bbox_masks = torch.cat([bbx[1] for bbx in bbox_mask], dim=1)
-        x_1 = torch.cat([expand(compressed_backbone_feats[1], instances_per_batch), level_bbox_masks.flatten(0, 1)], 1)
+        # level_bbox_masks = torch.cat([bbx[1] for bbx in bbox_mask], dim=1)
+        x_1 = torch.cat([expand_multi_length(compressed_backbone_feats[1], instances_per_batch),  bbox_mask[1]], 1)
         x_1 = self.lvl1_conv(x_1)
         x_1 = x_1 + F.interpolate(x_0, size=x_1.shape[-2:], mode="nearest")
+        x_1 = self.lvl1_merge(x_1)
 
         # H/16 W/16
-        level_bbox_masks = torch.cat([bbx[2] for bbx in bbox_mask], dim=1)
-        x_2 = torch.cat([expand(compressed_backbone_feats[2], instances_per_batch), level_bbox_masks.flatten(0, 1)], 1)
+        # level_bbox_masks = torch.cat([bbx[2] for bbx in bbox_mask], dim=1)
+        x_2 = torch.cat([expand_multi_length(compressed_backbone_feats[2], instances_per_batch), bbox_mask[2]], 1)
         x_2 = self.lvl2_conv(x_2)
         x_2 = x_2 + F.interpolate(x_1, size=x_2.shape[-2:], mode="nearest")
-        # Reduce channels as we are already in a high resolution
-        x_2 = self.lvl2_ch_reduction(x_2)
+        x_2 = self.lvl2_merge(x_2)
 
         # H/8 W/8
-        level_bbox_masks = torch.cat([bbx[3] for bbx in bbox_mask], dim=1)
-        x_3 = torch.cat([expand(compressed_backbone_feats[3], instances_per_batch), level_bbox_masks.flatten(0, 1)], 1)
+        # level_bbox_masks = torch.cat([bbx[3] for bbx in bbox_mask], dim=1)
+        x_3 = torch.cat([expand_multi_length(compressed_backbone_feats[3], instances_per_batch), bbox_mask[3]], 1)
         x_3 = self.lvl3_conv(x_3)
         x_3 = x_3 + F.interpolate(x_2, size=x_3.shape[-2:], mode="nearest")
+        x_3 = self.lvl3_merge(x_3)
 
         # H/4 W/4
-        last_fpn = self.adapter_fpn(features[0].tensors)
-        if last_fpn.size(0) != x_3.size(0):
-            last_fpn = expand(last_fpn, instances_per_batch)
+        last_fpn = self.adapter_fpn(features[-1])
+        last_fpn = expand_multi_length(last_fpn, instances_per_batch)
 
         x_out = last_fpn + F.interpolate(x_3, size=last_fpn.shape[-2:], mode="nearest")
-
-        x_out = self.merge_conv(x_out)
+        x_out = self.lvl4_merge(x_out)
         x_out = self.out_lay(x_out)
 
         return x_out
 
 
-class MultiScaleMHAttentionMaps(nn.Module):
+class MultiScaleMHAttentionMap(nn.Module):
 
     def __init__(self, query_dim, hidden_dim, num_heads, num_levels, dropout=0, bias=True):
         super().__init__()
@@ -176,7 +152,7 @@ class MultiScaleMHAttentionMaps(nn.Module):
         return out_multi_scale_maps
 
 
-class MultiScaleMHAttentionMapsReference(MultiScaleMHAttentionMaps):
+class MultiScaleMHAttentionMapsReference(MultiScaleMHAttentionMap):
     def __init__(self, query_dim, hidden_dim, num_heads, num_levels):
         super().__init__(query_dim, hidden_dim, num_heads, num_levels)
         self.reference_point_layer = nn.Linear(query_dim + 2, hidden_dim, bias=True)
@@ -186,71 +162,7 @@ class MultiScaleMHAttentionMapsReference(MultiScaleMHAttentionMaps):
         return super(MultiScaleMHAttentionMapsReference, self).forward(q, k, mask)
 
 
-class MHAttentionMapDefault(nn.Module):
-    """This is a 2D attention module, which only returns
-       the attention softmax (no multiplication by value)"""
-
-    def __init__(self, query_dim, hidden_dim, num_heads, dropout=0.0, bias=True):
-        super().__init__()
-        self.num_heads = num_heads
-        self.hidden_dim = hidden_dim
-        self.dropout = nn.Dropout(dropout)
-
-        self.q_linear = nn.Linear(query_dim, hidden_dim, bias=bias)
-        self.k_linear = nn.Linear(query_dim, hidden_dim, bias=bias)
-
-        nn.init.zeros_(self.k_linear.bias)
-        nn.init.zeros_(self.q_linear.bias)
-        nn.init.xavier_uniform_(self.k_linear.weight)
-        nn.init.xavier_uniform_(self.q_linear.weight)
-        self.normalize_fact = float(hidden_dim / self.num_heads) ** -0.5
-
-    def forward(self, q, k, mask=None):
-        q = self.q_linear(q)
-        k = F.conv2d(k, self.k_linear.weight.unsqueeze(-1).unsqueeze(-1), self.k_linear.bias)
-        qh = q.view(q.shape[0], q.shape[1], self.num_heads, self.hidden_dim // self.num_heads)
-        kh = k.view(
-            k.shape[0],
-            self.num_heads,
-            self.hidden_dim // self.num_heads,
-            k.shape[-2],
-            k.shape[-1])
-        weights = torch.einsum("bqnc,bnchw->bqnhw", qh * self.normalize_fact, kh)
-
-        if mask is not None:
-            weights.masked_fill_(mask.unsqueeze(1).unsqueeze(1), float("-inf"))
-        weights = F.softmax(weights.flatten(2), dim=-1).view_as(weights)
-        weights = self.dropout(weights)
-        return weights
-
-
-class InstanceSegmDefaultMHAttentionMap(MHAttentionMapDefault):
-    """This is a 2D attention module, which only returns
-       the attention softmax (no multiplication by value)"""
-
-    def forward(self, q, k, level=1, mask=None):
-        # Pick only corresponding resolution
-        k = k[level]
-        mask = mask[level]
-        q = self.q_linear(q)
-        k = F.conv2d(k, self.k_linear.weight.unsqueeze(-1).unsqueeze(-1), self.k_linear.bias)
-        qh = q.view(q.shape[0], q.shape[1], self.num_heads, self.hidden_dim // self.num_heads)
-        kh = k.view(
-            k.shape[0],
-            self.num_heads,
-            self.hidden_dim // self.num_heads,
-            k.shape[-2],
-            k.shape[-1])
-        weights = torch.einsum("bqnc,bnchw->bqnhw", qh * self.normalize_fact, kh)
-
-        if mask is not None:
-            weights.masked_fill_(mask.unsqueeze(1).unsqueeze(1), float("-inf"))
-        weights = F.softmax(weights.flatten(2), dim=-1).view_as(weights)
-        weights = self.dropout(weights)
-        return weights
-
-
-class InstanceSegmDefaultMaskHead(nn.Module):
+class MaskHeadSmallConvDefaultFullUpscale(nn.Module):
     """
     Simple convolutional head, using group norm.
     Upsampling is done using a FPN approach
@@ -258,30 +170,34 @@ class InstanceSegmDefaultMaskHead(nn.Module):
 
     def __init__(self, dim, fpn_dims, context_dim):
         super().__init__()
-        inter_dims = [
-            dim,
-            context_dim // 2,
-            context_dim // 4,
-            context_dim // 8,
-            context_dim // 16,
-            context_dim // 64]
-        self.lay1 = torch.nn.Conv2d(dim, dim, 3, padding=1)
-        self.gn1 = torch.nn.GroupNorm(8, dim)
-        self.lay2 = torch.nn.Conv2d(dim, inter_dims[1], 3, padding=1)
-        self.gn2 = torch.nn.GroupNorm(8, inter_dims[1])
-        self.lay3 = torch.nn.Conv2d(inter_dims[1], inter_dims[2], 3, padding=1)
-        self.gn3 = torch.nn.GroupNorm(8, inter_dims[2])
-        self.lay4 = torch.nn.Conv2d(inter_dims[2], inter_dims[3], 3, padding=1)
-        self.gn4 = torch.nn.GroupNorm(8, inter_dims[3])
-        self.lay5 = torch.nn.Conv2d(inter_dims[3], inter_dims[4], 3, padding=1)
+        inter_dims = [dim, context_dim // 2, context_dim // 4, context_dim // 8, context_dim // 16, context_dim // 64]
+
+        self.lay0 = torch.nn.Conv2d(dim, dim, 3, padding=1)
+        self.gn0 = torch.nn.GroupNorm(8, dim)
+
+        self.lay1 = torch.nn.Conv2d(dim, inter_dims[1], 3, padding=1)
+        self.gn1 = torch.nn.GroupNorm(8, inter_dims[1])
+
+        self.lay2 = torch.nn.Conv2d(inter_dims[1], inter_dims[2], 3, padding=1)
+        self.gn2 = torch.nn.GroupNorm(8, inter_dims[2])
+
+        self.lay3 = torch.nn.Conv2d(inter_dims[2], inter_dims[3], 3, padding=1)
+        self.gn3 = torch.nn.GroupNorm(8, inter_dims[3])
+
+        self.lay4 = torch.nn.Conv2d(inter_dims[3], inter_dims[4], 3, padding=1)
+        self.gn4 = torch.nn.GroupNorm(8, inter_dims[4])
+
+        self.lay5 = torch.nn.Conv2d(inter_dims[4], inter_dims[4], 3, padding=1)
         self.gn5 = torch.nn.GroupNorm(8, inter_dims[4])
+
         self.out_lay = torch.nn.Conv2d(inter_dims[4], 1, 3, padding=1)
 
         self.dim = dim
 
-        self.adapter1 = torch.nn.Conv2d(fpn_dims[0], inter_dims[1], 1)
-        self.adapter2 = torch.nn.Conv2d(fpn_dims[1], inter_dims[2], 1)
-        self.adapter3 = torch.nn.Conv2d(fpn_dims[2], inter_dims[3], 1)
+        self.adapter0 = torch.nn.Conv2d(fpn_dims[0], inter_dims[1], 1)
+        self.adapter1 = torch.nn.Conv2d(fpn_dims[1], inter_dims[2], 1)
+        self.adapter2 = torch.nn.Conv2d(fpn_dims[2], inter_dims[3], 1)
+        self.adapter3 = torch.nn.Conv2d(fpn_dims[3], inter_dims[4], 1)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -290,29 +206,30 @@ class InstanceSegmDefaultMaskHead(nn.Module):
 
     # x -> compressed ch backbone feats bbox_masks -> attention maps computed at each level fpn_feat -> Highest spatial res feature from the
     # backbone that in this case is not use by the transformer encoder, so we need to reduce channels
-    def forward(self, compressed_backbone_feats, bbox_mask, fpn_feat, instances_per_batch, level):
+    def forward(self, compressed_backbone_feats, bbox_mask, feats, instances_per_batch):
 
-        def expand_multi_length(tensor, lengths):
-            if isinstance(lengths, list):
-                tensors = []
-                for idx, length_to_repeat in enumerate(lengths):
-                    tensors.append(tensor[idx].unsqueeze(0).repeat(1, int(length_to_repeat), 1, 1, 1).flatten(0, 1))
-                return torch.cat(tensors, dim=0)
-            else:
-                return tensor.unsqueeze(1).repeat(1, int(lengths), 1, 1, 1).flatten(0, 1)
-
-        # H/32 W/32
-        expanded_feats = expand_multi_length(compressed_backbone_feats[level], instances_per_batch)
+        # H/64 W/64
+        expanded_feats = expand_multi_length(compressed_backbone_feats, instances_per_batch)
         x = torch.cat([expanded_feats, bbox_mask], 1)
+        x = self.lay0(x)
+        x = self.gn0(x)
+        x = F.relu(x)
         x = self.lay1(x)
         x = self.gn1(x)
         x = F.relu(x)
+
+        # H/32 W/32
+        cur_fpn = self.adapter0(feats[0])
+        if cur_fpn.size(0) != x.size(0):
+            cur_fpn = expand_multi_length(cur_fpn, instances_per_batch)
+        x = cur_fpn + F.interpolate(x, size=cur_fpn.shape[-2:], mode="nearest")
         x = self.lay2(x)
         x = self.gn2(x)
         x = F.relu(x)
 
+
         # H/16 W/16
-        cur_fpn = self.adapter1(fpn_feat[1])
+        cur_fpn = self.adapter1(feats[1])
         if cur_fpn.size(0) != x.size(0):
             cur_fpn = expand_multi_length(cur_fpn, instances_per_batch)
         x = cur_fpn + F.interpolate(x, size=cur_fpn.shape[-2:], mode="nearest")
@@ -321,7 +238,7 @@ class InstanceSegmDefaultMaskHead(nn.Module):
         x = F.relu(x)
 
         # H/8 W/8
-        cur_fpn = self.adapter2(fpn_feat[2])
+        cur_fpn = self.adapter2(feats[2])
         if cur_fpn.size(0) != x.size(0):
             cur_fpn = expand_multi_length(cur_fpn, instances_per_batch)
         x = cur_fpn + F.interpolate(x, size=cur_fpn.shape[-2:], mode="nearest")
@@ -330,7 +247,7 @@ class InstanceSegmDefaultMaskHead(nn.Module):
         x = F.relu(x)
 
         # H/4 W/4
-        cur_fpn = self.adapter3(fpn_feat[3])
+        cur_fpn = self.adapter3(feats[3])
         if cur_fpn.size(0) != x.size(0):
             cur_fpn = expand_multi_length(cur_fpn, instances_per_batch)
         x = cur_fpn + F.interpolate(x, size=cur_fpn.shape[-2:], mode="nearest")

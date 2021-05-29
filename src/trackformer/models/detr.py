@@ -122,7 +122,7 @@ class DETR(nn.Module):
             out['aux_outputs'] = self._set_aux_loss(
                 outputs_class, outputs_coord)
 
-        return out, targets, features, memory, hs
+        return out, targets, features, memory, hs, None, None, None, None, None
 
     @torch.jit.unused
     def _set_aux_loss(self, outputs_class, outputs_coord):

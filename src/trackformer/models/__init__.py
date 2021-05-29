@@ -11,7 +11,7 @@ from .detr_segmentation import (DeformableDETRSegm, DeformableDETRSegmTracking,
 from .detr_tracking import DeformableDETRTracking, DETRTracking
 from .matcher import build_matcher
 from .transformer import build_transformer
-from .inst_segm_deformable_detr import build_instance_segm_model, InstSegmBoxPostProcess, InstSegmMaskPostProcess
+from .inst_segm_deformable_detr import build_instance_segm_model
 
 
 def build_model(args):
@@ -30,15 +30,15 @@ def build_model(args):
 
     detr_kwargs = {
         'backbone': backbone,
-        'num_classes': num_classes -1 if args.focal_loss else num_classes,
+        'num_classes': num_classes - 1 if args.focal_loss else num_classes,
         'num_queries': args.num_queries,
-        'aux_loss': args.aux_loss,}
+        'aux_loss': args.aux_loss, }
 
     tracking_kwargs = {
         'track_query_false_positive_prob': args.track_query_false_positive_prob,
         'track_query_false_negative_prob': args.track_query_false_negative_prob,
         'track_query_noise': args.track_query_noise,
-        'matcher': matcher,}
+        'matcher': matcher, }
 
     mask_kwargs = {
         'freeze_detr': args.freeze_detr,
@@ -46,7 +46,10 @@ def build_model(args):
         'fill_batch': args.fill_batch,
         'batch_mode': args.batch_mode,
         'attention_map_lvl': args.attention_map_lvl,
+        "use_encoded_feats": args.use_encoded_feats,
         'matcher': matcher, }
+    # mask_kwargs = {
+    #     'freeze_detr': args.freeze_detr}
 
     if args.deformable:
         transformer = build_deforamble_transformer(args)
@@ -62,8 +65,9 @@ def build_model(args):
             else:
                 model = DeformableDETRTracking(tracking_kwargs, detr_kwargs)
         else:
-            if args.inst_segm:
-                model = build_instance_segm_model(args.inst_segm, mask_kwargs, detr_kwargs)
+            if args.inst_segm_module:
+                model = build_instance_segm_model(args.inst_segm_module, mask_kwargs, detr_kwargs)
+
             elif args.masks:
                 model = DeformableDETRSegm(mask_kwargs, detr_kwargs)
             else:
@@ -86,7 +90,7 @@ def build_model(args):
 
     weight_dict = {'loss_ce': args.cls_loss_coef,
                    'loss_bbox': args.bbox_loss_coef,
-                   'loss_giou': args.giou_loss_coef,}
+                   'loss_giou': args.giou_loss_coef, }
 
     if args.masks:
         weight_dict["loss_mask"] = args.mask_loss_coef
@@ -121,14 +125,9 @@ def build_model(args):
     else:
         postprocessors = {'bbox': PostProcess()}
     if args.masks:
-        if args.inst_segm:
-            # Overwrite bbox post processor
-            postprocessors = {'bbox': InstSegmBoxPostProcess(top_k_predictions=args.top_k_inference),
-                              'segm': InstSegmMaskPostProcess(top_k_predictions=args.top_k_inference)}
-        else:
-            postprocessors['segm'] = PostProcessSegm()
-            if args.dataset == "coco_panoptic":
-                is_thing_map = {i: i <= 90 for i in range(201)}
-                postprocessors["panoptic"] = PostProcessPanoptic(is_thing_map, threshold=0.85)
+        postprocessors['segm'] = PostProcessSegm()
+        if args.dataset == "coco_panoptic":
+            is_thing_map = {i: i <= 90 for i in range(201)}
+            postprocessors["panoptic"] = PostProcessPanoptic(is_thing_map, threshold=0.85)
 
     return model, criterion, postprocessors

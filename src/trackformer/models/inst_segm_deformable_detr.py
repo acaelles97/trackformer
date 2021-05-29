@@ -6,8 +6,7 @@ from ..util.misc import (NestedTensor, nested_tensor_from_tensor_list,
 
 from .deformable_detr import DeformableDETR
 from .inst_segm_modules import *
-from ..util import box_ops
-from .detr import PostProcess
+from .detr_segmentation import MaskHeadSmallConvDefault, MHAttentionMapDefault
 from .ops.modules import MSDeformAttn, MSDeformAttnPytorch
 
 
@@ -107,16 +106,24 @@ class DefDETRInstanceSeg(DeformableDETR):
         out["indices"] = indices
         return out, targets, features, memories, srcs, masks, hs, pos_embd, inter_references, query_embed
 
+    def get_top_k_embeddings(self, out, hs):
+        indices = self.get_top_k_indices(out)
+        objs_embeddings = torch.gather(hs[-1], 1, indices.unsqueeze(-1).repeat(1, 1, hs[-1].shape[-1]))
+        return objs_embeddings
+
 
 class DefDETRInstanceSegTopK(DefDETRInstanceSeg):
     def __init__(self, mask_kwargs, detr_kwargs):
         super().__init__(mask_kwargs, detr_kwargs)
 
+        self.res_lvl = mask_kwargs["attention_map_lvl"]
+        self.use_encoded_feats = mask_kwargs["use_encoded_feats"]
         hidden_dim, nheads = self.transformer.d_model, self.transformer.nhead
 
-        self.bbox_attention = InstanceSegmDefaultMHAttentionMap(hidden_dim, hidden_dim, nheads, dropout=0)
-        self.mask_head = InstanceSegmDefaultMaskHead(hidden_dim + nheads, [1024, 512, 256], hidden_dim)
-        self.attention_map_lvl = mask_kwargs["attention_map_lvl"]
+        self.bbox_attention = MHAttentionMapDefault(hidden_dim, hidden_dim, nheads, dropout=0)
+
+        feats_dims = [256, 256, 256] if self.use_encoded_feats else [1024, 512, 256]
+        self.mask_head = MaskHeadSmallConvDefault(hidden_dim + nheads, feats_dims, hidden_dim)
 
     def forward(self, samples: NestedTensor, targets: list = None):
 
@@ -124,16 +131,16 @@ class DefDETRInstanceSegTopK(DefDETRInstanceSeg):
 
         indices = out["indices"]
         memories, srcs, masks = list(reversed(memories)), list(reversed(srcs)), list(reversed(masks))
-        features = list(reversed([feat.tensors for feat in features]))
+        backbone_feats = list(reversed([feat.tensors for feat in features]))
 
         if self.fill_batch:
             matched_embeddings, instances_per_batch = self.prepare_batch_fill_random_embeddings(out, hs, indices, targets)
-            bbox_masks = self.bbox_attention(matched_embeddings, memories, mask=masks, level=self.attention_map_lvl)
+            bbox_masks = self.bbox_attention(matched_embeddings, memories[self.res_lvl], mask=masks[self.res_lvl])
             bbox_masks = bbox_masks.flatten(0, 1)
 
         elif self.batch_mode:
             matched_embeddings, instances_per_batch = self.prepare_tmp_batch_fill(indices, hs)
-            bbox_masks = self.bbox_attention(matched_embeddings, memories, mask=masks, level=self.attention_map_lvl)
+            bbox_masks = self.bbox_attention(matched_embeddings, memories[self.res_lvl], mask=masks[self.res_lvl])
             indices_to_pick = [torch.arange(0, num_instances) for num_instances in instances_per_batch]
             indices_to_pick = self.get_src_permutation_idx(indices_to_pick)
             bbox_masks = bbox_masks[indices_to_pick]
@@ -146,12 +153,13 @@ class DefDETRInstanceSegTopK(DefDETRInstanceSeg):
                 matched_embeddings = hs[-1, idx, embd_idxs].unsqueeze(0)
                 batch_memories = [mem[idx].unsqueeze(0) for mem in memories]
                 batch_masks = [mask[idx].unsqueeze(0) for mask in masks]
-                bbox_mask = self.bbox_attention(matched_embeddings, batch_memories, mask=batch_masks, level=self.attention_map_lvl)
+                bbox_mask = self.bbox_attention(matched_embeddings, batch_memories[self.res_lvl], mask=batch_masks[self.res_lvl])
                 bbox_masks.append(bbox_mask)
 
             bbox_masks = torch.cat(bbox_masks, dim=1).squeeze(0)
 
-        seg_masks = self.mask_head(srcs, bbox_masks, features, instances_per_batch=instances_per_batch, level=self.attention_map_lvl)
+        features = [memories[1], memories[2], memories[3], backbone_feats[-1]] if self.use_encoded_feats else backbone_feats
+        seg_masks = self.mask_head(srcs[self.res_lvl], bbox_masks, features, instances_per_batch=instances_per_batch)
 
         # Compute ouput mask for loss prediction
         out["pred_masks"] = seg_masks
@@ -159,21 +167,100 @@ class DefDETRInstanceSegTopK(DefDETRInstanceSeg):
         generate_predictions = targets[0]["generate_predictions"]
         # Compute Inference masks for later use when doing validation
         if not self.training or generate_predictions:
-            out["inference_masks"] = self._predict_masks(out, features, srcs, memories, masks, hs)
+            out["inference_masks"] = self.predict_masks(out, features, srcs, memories, masks, hs)
 
         return out, targets, None
 
     # Implements mask computation from forward output for inference taking only into account top k predictions
-    def _predict_masks(self, out, features, srcs, memories, masks, hs):
-        indices = self.get_top_k_indices(out)
-        bs = indices.shape[0]
-        objs_embeddings = torch.gather(hs[-1], 1, indices.unsqueeze(-1).repeat(1, 1, hs[-1].shape[-1]))
+    def predict_masks(self, out, features, srcs, memories, masks, hs):
+        objs_embeddings = self.get_top_k_embeddings(out, hs)
 
-        bbox_masks = self.bbox_attention(objs_embeddings, memories, mask=masks, level=self.attention_map_lvl)
+        bbox_masks = self.bbox_attention(objs_embeddings, memories[self.res_lvl], mask=masks[self.res_lvl])
         bbox_masks = bbox_masks.flatten(0, 1)
 
-        out_masks = self.mask_head(srcs, bbox_masks, features, instances_per_batch=self.top_k_predictions, level=self.attention_map_lvl)
-        outputs_seg_masks = out_masks.view(bs, self.top_k_predictions, out_masks.shape[-2], out_masks.shape[-1])
+        out_masks = self.mask_head(srcs[self.res_lvl], bbox_masks, features, instances_per_batch=self.top_k_predictions)
+        outputs_seg_masks = out_masks.view(hs.shape[1], self.top_k_predictions, out_masks.shape[-2], out_masks.shape[-1])
+
+        return outputs_seg_masks
+
+
+class DefDETRInstanceSegFullUpscale(DefDETRInstanceSegTopK):
+    def __init__(self, mask_kwargs, detr_kwargs):
+        super().__init__(mask_kwargs, detr_kwargs)
+
+        hidden_dim, nheads = self.transformer.d_model, self.transformer.nhead
+
+        self.bbox_attention = MHAttentionMapDefault(hidden_dim, hidden_dim, nheads, dropout=0)
+        feats_dims = [256, 256, 256, 256] if self.use_encoded_feats else [2048, 1024, 512, 256]
+        self.mask_head = MaskHeadSmallConvDefaultFullUpscale(hidden_dim + nheads, feats_dims, hidden_dim)
+        self.res_lvl = 0
+
+
+
+class DefDETRInstanceSegMultiScale(DefDETRInstanceSeg):
+    def __init__(self, mask_kwargs, detr_kwargs):
+        super().__init__(mask_kwargs, detr_kwargs)
+
+        hidden_dim, nheads = self.transformer.d_model, self.transformer.nhead
+
+        self.num_levels = 4
+        self.bbox_attention = MultiScaleMHAttentionMap(hidden_dim, hidden_dim, nheads, num_levels=self.num_levels, dropout=0)
+        self.mask_head = InstanceSegmSumBatchMaskHead(hidden_dim + nheads, [1024, 512, 256], hidden_dim)
+
+    def forward(self, samples: NestedTensor, targets: list = None):
+
+        out, targets, features, memories, srcs, masks, hs, pos_embd, inter_references, query_embed = super().forward(samples, targets)
+
+        indices = out["indices"]
+        memories, srcs, masks = list(reversed(memories)), list(reversed(srcs)), list(reversed(masks))
+        features = list(reversed([feat.tensors for feat in features]))
+
+        if self.fill_batch:
+            matched_embeddings, instances_per_batch = self.prepare_batch_fill_random_embeddings(out, hs, indices, targets)
+            bbox_masks = self.bbox_attention(matched_embeddings, memories, mask=masks)
+            bbox_masks = [bbox_mask.flatten(0, 1) for bbox_mask in bbox_masks]
+
+        elif self.batch_mode:
+            matched_embeddings, instances_per_batch = self.prepare_tmp_batch_fill(indices, hs)
+            bbox_masks = self.bbox_attention(matched_embeddings, memories, mask=masks)
+            indices_to_pick = [torch.arange(0, num_instances) for num_instances in instances_per_batch]
+            indices_to_pick = self.get_src_permutation_idx(indices_to_pick)
+            bbox_masks = [bbox_mask[indices_to_pick] for bbox_mask in bbox_masks]
+
+        else:
+            instances_per_batch = [idx[0].shape[0] for idx in indices]
+            bbox_masks = []
+            # We have different num of masks to compute for each batch so we need to split computation
+            for idx, (embd_idxs, _) in enumerate(indices):
+                matched_embeddings = hs[-1, idx, embd_idxs].unsqueeze(0)
+                batch_memories = [mem[idx].unsqueeze(0) for mem in memories]
+                batch_masks = [mask[idx].unsqueeze(0) for mask in masks]
+                bbox_mask = self.bbox_attention(matched_embeddings, batch_memories, mask=batch_masks)
+                bbox_masks.append(bbox_mask)
+
+            bbox_masks = [torch.cat([batch_bbox[lvl] for batch_bbox in bbox_masks], dim=1).squeeze(0) for lvl in range(self.num_levels)]
+
+        seg_masks = self.mask_head(srcs, bbox_masks, features, instances_per_batch=instances_per_batch)
+
+        # Compute ouput mask for loss prediction
+        out["pred_masks"] = seg_masks
+
+        generate_predictions = targets[0]["generate_predictions"]
+        # Compute Inference masks for later use when doing validation
+        if not self.training or generate_predictions:
+            out["inference_masks"] = self.predict_masks(out, features, srcs, memories, masks, hs)
+
+        return out, targets, None
+
+    # Implements mask computation from forward output for inference taking only into account top k predictions
+    def predict_masks(self, out, features, srcs, memories, masks, hs):
+        objs_embeddings = self.get_top_k_embeddings(out, hs)
+
+        bbox_masks = self.bbox_attention(objs_embeddings, memories, mask=masks)
+        bbox_masks = [bbox_mask.flatten(0, 1) for bbox_mask in bbox_masks]
+
+        out_masks = self.mask_head(srcs, bbox_masks, features, instances_per_batch=self.top_k_predictions)
+        outputs_seg_masks = out_masks.view(hs.shape[1], self.top_k_predictions, out_masks.shape[-2], out_masks.shape[-1])
 
         return outputs_seg_masks
 
@@ -232,7 +319,8 @@ class DefDETRInstSegmDefMaskHead(DefDETRInstanceSeg):
         out, targets, features, memories, srcs, masks, hs, pos_embd, inter_references, query_embed = super().forward(samples, targets)
         indices = out["indices"]
 
-        mem_fltn, mask_flatten, lvl_pos_embed_fltn, spatial_shapes, level_start_index, valid_ratios = self.prepare_inputs(memories, masks, pos_embd)
+        mem_fltn, mask_flatten, lvl_pos_embed_fltn, spatial_shapes, level_start_index, valid_ratios = self.prepare_inputs(memories, masks,
+                                                                                                                          pos_embd)
         reference_points_input = self.process_reference_points(inter_references[-1], valid_ratios)
 
         gt_num_instances = [tg["boxes"].shape[0] for tg in targets]
@@ -253,7 +341,8 @@ class DefDETRInstSegmDefMaskHead(DefDETRInstanceSeg):
             out_masks = self.def_bbx_attention(self.with_pos_embed(matched_embeddings, matched_query_embed),
                                                matched_reference_points_input, batch_memory, spatial_shapes, level_start_index, batch_mask)
             out_masks_pytorch = self.def_bbx_attention_pytorch(self.with_pos_embed(matched_embeddings, matched_query_embed),
-                                               matched_reference_points_input, batch_memory, spatial_shapes, level_start_index, batch_mask)
+                                                               matched_reference_points_input, batch_memory, spatial_shapes, level_start_index,
+                                                               batch_mask)
             bbox_masks.append(out_masks)
 
         print("a")
@@ -264,66 +353,9 @@ def build_instance_segm_model(model_name, mask_kwargs, detr_kwargs):
         return DefDETRInstanceSegTopK(mask_kwargs, detr_kwargs)
     elif model_name == "DefDETRInstSegmDefMaskHead":
         return DefDETRInstSegmDefMaskHead(mask_kwargs, detr_kwargs)
+    elif model_name == "DefDETRInstanceSegMultiScale":
+        return DefDETRInstanceSegMultiScale(mask_kwargs, detr_kwargs)
+    elif model_name == "DefDETRInstanceSegFullUpscale":
+        return DefDETRInstanceSegFullUpscale(mask_kwargs, detr_kwargs)
     else:
         raise ModuleNotFoundError("Please select valid inst segm model")
-
-
-class InstSegmBoxPostProcess(PostProcess):
-    def __init__(self, top_k_predictions=100):
-        super().__init__()
-        self.top_k_predictions = top_k_predictions
-
-    @torch.no_grad()
-    def forward(self, outputs, target_sizes):
-        """ Perform the computation
-        Parameters:
-            outputs: raw outputs of the model
-            target_sizes: tensor of dimension [batch_size x 2] containing the size of each images of the batch
-                          For evaluation, this must be the original image size (before any data augmentation)
-                          For visualization, this should be the image size after data augment, but before padding
-        """
-        out_logits, out_bbox = outputs['pred_logits'], outputs['pred_boxes']
-
-        assert len(out_logits) == len(target_sizes)
-        assert target_sizes.shape[1] == 2
-
-        top_k_indexes = outputs["top_k_indexes"]
-        scores = outputs["top_k_values"]
-
-        topk_boxes = top_k_indexes // out_logits.shape[2]
-        labels = top_k_indexes % out_logits.shape[2]
-        boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
-        boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1, 1, 4))
-
-        # and from relative [0, 1] to absolute [0, height] coordinates
-        img_h, img_w = target_sizes.unbind(1)
-        scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
-        boxes = boxes * scale_fct[:, None, :]
-
-        results = [{'scores': s, 'labels': l, 'scores_no_object': 1 - s, 'boxes': b} for s, l, b in zip(scores, labels, boxes)]
-        return results
-
-
-class InstSegmMaskPostProcess(nn.Module):
-    def __init__(self, top_k_predictions=100, threshold=0.5):
-        super().__init__()
-        self.threshold = threshold
-        self.top_k_predictions = top_k_predictions
-
-    @torch.no_grad()
-    def forward(self, results, outputs, orig_target_sizes, max_target_sizes):
-        assert len(orig_target_sizes) == len(max_target_sizes)
-        max_h, max_w = max_target_sizes.max(0)[0].tolist()
-        outputs_masks = outputs["inference_masks"]
-
-        outputs_masks = F.interpolate(outputs_masks, size=(max_h, max_w), mode="bilinear", align_corners=False)
-        outputs_masks = (outputs_masks.sigmoid() > self.threshold).cpu()
-
-        for i, (cur_mask, t, tt) in enumerate(zip(outputs_masks, max_target_sizes, orig_target_sizes)):
-            img_h, img_w = t[0], t[1]
-            results[i]["masks"] = cur_mask[:, :img_h, :img_w].unsqueeze(1)
-            results[i]["masks"] = F.interpolate(
-                results[i]["masks"].float(), size=tuple(tt.tolist()), mode="nearest"
-            ).byte()
-
-        return results

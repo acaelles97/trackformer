@@ -5,7 +5,7 @@ to predict masks, as well as the losses.
 """
 import io
 from collections import defaultdict
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -33,42 +33,40 @@ class DETRSegmBase(nn.Module):
                 param.requires_grad_(False)
 
         nheads = self.transformer.nhead
-        self.bbox_attention = MHAttentionMap(self.hidden_dim, self.hidden_dim, nheads, dropout=0.0)
+        self.bbox_attention = MHAttentionMapDefault(self.hidden_dim, self.hidden_dim, nheads, dropout=0.0)
 
-        self.mask_head = MaskHeadSmallConv(
+        self.mask_head = MaskHeadSmallConvDefault(
             self.hidden_dim + nheads, self.fpn_channels, self.hidden_dim)
 
     def forward(self, samples: NestedTensor, targets: list = None):
-        out, targets, features, memory, hs = super().forward(samples, targets)
+        out, targets, features, memory, hs, srcs, pos, masks, inter_references, query_embed = super().forward(samples, targets)
 
+        instances_per_batch = hs.shape[2]
+        # Check if it comes from DeTr or Def DeTr
         if isinstance(memory, list):
-            src, mask = features[-2].decompose()
-            batch_size = src.shape[0]
-
-            src = self.input_proj[-3](src)
-            mask = F.interpolate(mask[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
+            batch_size = memory[0].shape[0]
+            src, mask, memory = srcs[-3], masks[-3], memory[-3]
 
             # fpns = [memory[2], memory[1], memory[0]]
-            fpns = [features[-2].tensors, features[-3].tensors, features[-4].tensors]
-            memory = memory[-3]
+            fpns = [features[-1].tensors, features[-2].tensors, features[-3].tensors, features[-4].tensors]
+
         else:
             src, mask = features[-1].decompose()
             batch_size = src.shape[0]
-
             src = self.input_proj(src)
-
-            fpns = [features[2].tensors, features[1].tensors, features[0].tensors]
+            fpns = [None, features[2].tensors, features[1].tensors, features[0].tensors]
 
         # FIXME h_boxes takes the last one computed, keep this in mind
         bbox_mask = self.bbox_attention(hs[-1], memory, mask=mask)
+        bbox_mask = bbox_mask.flatten(0, 1)
 
-        seg_masks = self.mask_head(src, bbox_mask, fpns)
+        seg_masks = self.mask_head(src, bbox_mask, fpns, instances_per_batch=instances_per_batch)
         outputs_seg_masks = seg_masks.view(
             batch_size, hs.shape[2], seg_masks.shape[-2], seg_masks.shape[-1])
 
         out["pred_masks"] = outputs_seg_masks
 
-        return out, targets, features, memory, hs
+        return out, targets, features, memory, hs, srcs, pos, masks, inter_references, query_embed
 
 
 # TODO: with meta classes
@@ -98,11 +96,17 @@ class DeformableDETRSegmTracking(DETRSegmBase, DETRTrackingBase, DeformableDETR)
         DETRSegmBase.__init__(self, **mask_kwargs)
 
 
-def _expand(tensor, length: int):
-    return tensor.unsqueeze(1).repeat(1, int(length), 1, 1, 1).flatten(0, 1)
+def expand_multi_length(tensor, lengths):
+    if isinstance(lengths, list):
+        tensors = []
+        for idx, length_to_repeat in enumerate(lengths):
+            tensors.append(tensor[idx].unsqueeze(0).repeat(1, int(length_to_repeat), 1, 1, 1).flatten(0, 1))
+        return torch.cat(tensors, dim=0)
+    else:
+        return tensor.unsqueeze(1).repeat(1, int(lengths), 1, 1, 1).flatten(0, 1)
 
 
-class MaskHeadSmallConv(nn.Module):
+class MaskHeadSmallConvDefault(nn.Module):
     """
     Simple convolutional head, using group norm.
     Upsampling is done using a FPN approach
@@ -121,12 +125,16 @@ class MaskHeadSmallConv(nn.Module):
         self.gn1 = torch.nn.GroupNorm(8, dim)
         self.lay2 = torch.nn.Conv2d(dim, inter_dims[1], 3, padding=1)
         self.gn2 = torch.nn.GroupNorm(8, inter_dims[1])
+
         self.lay3 = torch.nn.Conv2d(inter_dims[1], inter_dims[2], 3, padding=1)
         self.gn3 = torch.nn.GroupNorm(8, inter_dims[2])
+
         self.lay4 = torch.nn.Conv2d(inter_dims[2], inter_dims[3], 3, padding=1)
         self.gn4 = torch.nn.GroupNorm(8, inter_dims[3])
+
         self.lay5 = torch.nn.Conv2d(inter_dims[3], inter_dims[4], 3, padding=1)
         self.gn5 = torch.nn.GroupNorm(8, inter_dims[4])
+
         self.out_lay = torch.nn.Conv2d(inter_dims[4], 1, 3, padding=1)
 
         self.dim = dim
@@ -140,9 +148,13 @@ class MaskHeadSmallConv(nn.Module):
                 nn.init.kaiming_uniform_(m.weight, a=1)
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, x: Tensor, bbox_mask: Tensor, fpns: List[Tensor]):
-        x = torch.cat([_expand(x, bbox_mask.shape[1]), bbox_mask.flatten(0, 1)], 1)
+    # x -> compressed ch backbone feats bbox_masks -> attention maps computed at each level fpn_feat -> Highest spatial res feature from the
+    # backbone that in this case is not use by the transformer encoder, so we need to reduce channels
+    def forward(self, compressed_backbone_feats, bbox_mask, fpn_feat, instances_per_batch):
 
+        # H/64 W/64 or H/32 W/32
+        expanded_feats = expand_multi_length(compressed_backbone_feats, instances_per_batch)
+        x = torch.cat([expanded_feats, bbox_mask], 1)
         x = self.lay1(x)
         x = self.gn1(x)
         x = F.relu(x)
@@ -150,25 +162,28 @@ class MaskHeadSmallConv(nn.Module):
         x = self.gn2(x)
         x = F.relu(x)
 
-        cur_fpn = self.adapter1(fpns[0])
+        # H/16 W/16
+        cur_fpn = self.adapter1(fpn_feat[1])
         if cur_fpn.size(0) != x.size(0):
-            cur_fpn = _expand(cur_fpn, x.size(0) // cur_fpn.size(0))
+            cur_fpn = expand_multi_length(cur_fpn, instances_per_batch)
         x = cur_fpn + F.interpolate(x, size=cur_fpn.shape[-2:], mode="nearest")
         x = self.lay3(x)
         x = self.gn3(x)
         x = F.relu(x)
 
-        cur_fpn = self.adapter2(fpns[1])
+        # H/8 W/8
+        cur_fpn = self.adapter2(fpn_feat[2])
         if cur_fpn.size(0) != x.size(0):
-            cur_fpn = _expand(cur_fpn, x.size(0) // cur_fpn.size(0))
+            cur_fpn = expand_multi_length(cur_fpn, instances_per_batch)
         x = cur_fpn + F.interpolate(x, size=cur_fpn.shape[-2:], mode="nearest")
         x = self.lay4(x)
         x = self.gn4(x)
         x = F.relu(x)
 
-        cur_fpn = self.adapter3(fpns[2])
+        # H/4 W/4
+        cur_fpn = self.adapter3(fpn_feat[3])
         if cur_fpn.size(0) != x.size(0):
-            cur_fpn = _expand(cur_fpn, x.size(0) // cur_fpn.size(0))
+            cur_fpn = expand_multi_length(cur_fpn, instances_per_batch)
         x = cur_fpn + F.interpolate(x, size=cur_fpn.shape[-2:], mode="nearest")
         x = self.lay5(x)
         x = self.gn5(x)
@@ -178,7 +193,7 @@ class MaskHeadSmallConv(nn.Module):
         return x
 
 
-class MHAttentionMap(nn.Module):
+class MHAttentionMapDefault(nn.Module):
     """This is a 2D attention module, which only returns
        the attention softmax (no multiplication by value)"""
 
@@ -225,7 +240,10 @@ class PostProcessSegm(nn.Module):
     def forward(self, results, outputs, orig_target_sizes, max_target_sizes, return_probs=False):
         assert len(orig_target_sizes) == len(max_target_sizes)
         max_h, max_w = max_target_sizes.max(0)[0].tolist()
-        outputs_masks = outputs["pred_masks"].squeeze(2)
+        if "inference_masks" in outputs:
+            outputs_masks = outputs["inference_masks"]
+        else:
+            outputs_masks = outputs["pred_masks"].squeeze(2)
         outputs_masks = F.interpolate(
             outputs_masks,
             size=(max_h, max_w),
@@ -293,7 +311,7 @@ class PostProcessPanoptic(nn.Module):
             return tuple(tup.cpu().tolist())
 
         for cur_logits, cur_masks, cur_boxes, size, target_size in zip(
-            out_logits, raw_masks, raw_boxes, processed_sizes, target_sizes
+                out_logits, raw_masks, raw_boxes, processed_sizes, target_sizes
         ):
             # we filter empty queries and detection below threshold
             scores, labels = cur_logits.softmax(-1).max(-1)
