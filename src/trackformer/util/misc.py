@@ -25,6 +25,13 @@ if float(torchvision.__version__[:3]) < 0.7:
     from torchvision.ops import _new_empty_tensor
     from torchvision.ops.misc import _output_size
 
+def match_name_keywords(n, name_keywords):
+    out = False
+    for b in name_keywords:
+        if b in n:
+            out = True
+            break
+    return out
 
 class SmoothedValue(object):
     """Track a series of values and provide access to smoothed values over a

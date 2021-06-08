@@ -24,11 +24,12 @@ ex.add_config(root_dir + '/cfgs/submit.yaml')
 
 def get_shared_folder() -> Path:
     user = os.getenv("USER")
-    if Path("/storage/slurm").is_dir():
-        path = Path(f"/storage/slurm/{user}/runs")
-        path.mkdir(exist_ok=True)
-        return path
-    raise RuntimeError("No shared folder available")
+    return Path("/usr/prakt/p028/slurm_jobs/runs")
+    # if Path("/storage/slurm").is_dir():
+    #     path = Path(f"/usr/prakt/p028/slurm_jobs/runs")
+    #     path.mkdir(exist_ok=True)
+    #     return path
+    # raise RuntimeError("No shared folder available")
 
 
 def get_init_file() -> Path:

@@ -13,3 +13,6 @@ epochs: 25
 resume: /usr/prakt/p028/projects/Trackformer/trackformer/models/r50_deformable_detr-checkpoint.pth
 freeze_detr: true
 aux_loss: false
+lr_linear_proj_names: []
+lr_backbone_names: []
+resume_shift_neuron: True

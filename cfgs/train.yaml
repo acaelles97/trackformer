@@ -1,4 +1,6 @@
 lr: 0.0001
+lr_transformer_names: []
+lr_transformer_mult: 0.1
 lr_backbone_names: ['backbone.0']
 lr_backbone: 0.00001
 lr_linear_proj_names: ['reference_points', 'sampling_offsets']
@@ -63,6 +65,8 @@ top_k_inference: 100
 fill_batch: false
 batch_mode: false
 attention_map_lvl: 1
+deformable_used_res: [0,1,2,3]
+mask_head_used_res: [0,2,3]
 use_encoded_feats: false
 # Matcher
 # Class coefficient in the matching cost
@@ -106,6 +110,7 @@ device: cuda
 seed: 42
 # resume from checkpoint
 resume: ''
+resume_shift_neuron: False
 # resume optimization from checkpoint
 resume_optim: false
 # resume Visdom visualization

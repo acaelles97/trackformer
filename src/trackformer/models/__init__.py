@@ -42,10 +42,14 @@ def build_model(args):
 
     mask_kwargs = {
         'freeze_detr': args.freeze_detr,
+
+        'trainable_params': [param[0] for param in args.lr_transformer_names] + args.lr_backbone_names,
         'top_k_predictions': args.top_k_inference,
         'fill_batch': args.fill_batch,
         'batch_mode': args.batch_mode,
         'attention_map_lvl': args.attention_map_lvl,
+        "deformable_used_res": args.deformable_used_res,
+        "mask_head_used_res":  args.mask_head_used_res,
         "use_encoded_feats": args.use_encoded_feats,
         'matcher': matcher, }
     # mask_kwargs = {

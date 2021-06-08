@@ -112,7 +112,7 @@ class MaskHeadSmallConvDefault(nn.Module):
     Upsampling is done using a FPN approach
     """
 
-    def __init__(self, dim, fpn_dims, context_dim):
+    def __init__(self, dim, fpn_dims, context_dim, nheads=0, concat_on_layer=True, extra_feat_dim=None):
         super().__init__()
         inter_dims = [
             dim,
@@ -121,26 +121,33 @@ class MaskHeadSmallConvDefault(nn.Module):
             context_dim // 8,
             context_dim // 16,
             context_dim // 64]
-        self.lay1 = torch.nn.Conv2d(dim, dim, 3, padding=1)
-        self.gn1 = torch.nn.GroupNorm(8, dim)
-        self.lay2 = torch.nn.Conv2d(dim, inter_dims[1], 3, padding=1)
+
+        layer_extra_channels = nheads if concat_on_layer else 0
+        adapter_extra_channels = nheads if not concat_on_layer else 0
+        if extra_feat_dim is None:
+            extra_feat_dim = dim
+
+        self.lay1 = torch.nn.Conv2d(dim, extra_feat_dim, 3, padding=1)
+        self.gn1 = torch.nn.GroupNorm(8, extra_feat_dim)
+        self.lay2 = torch.nn.Conv2d(extra_feat_dim, inter_dims[1], 3, padding=1)
         self.gn2 = torch.nn.GroupNorm(8, inter_dims[1])
 
-        self.lay3 = torch.nn.Conv2d(inter_dims[1], inter_dims[2], 3, padding=1)
+        self.lay3 = torch.nn.Conv2d(inter_dims[1] + layer_extra_channels, inter_dims[2], 3, padding=1)
         self.gn3 = torch.nn.GroupNorm(8, inter_dims[2])
 
-        self.lay4 = torch.nn.Conv2d(inter_dims[2], inter_dims[3], 3, padding=1)
+        self.lay4 = torch.nn.Conv2d(inter_dims[2] + layer_extra_channels, inter_dims[3], 3, padding=1)
         self.gn4 = torch.nn.GroupNorm(8, inter_dims[3])
 
         self.lay5 = torch.nn.Conv2d(inter_dims[3], inter_dims[4], 3, padding=1)
         self.gn5 = torch.nn.GroupNorm(8, inter_dims[4])
 
         self.out_lay = torch.nn.Conv2d(inter_dims[4], 1, 3, padding=1)
-
+        self.concat_on_layer = concat_on_layer
+        self.extra_feat_dim = extra_feat_dim
         self.dim = dim
 
-        self.adapter1 = torch.nn.Conv2d(fpn_dims[0], inter_dims[1], 1)
-        self.adapter2 = torch.nn.Conv2d(fpn_dims[1], inter_dims[2], 1)
+        self.adapter1 = torch.nn.Conv2d(fpn_dims[0] + adapter_extra_channels, inter_dims[1], 1)
+        self.adapter2 = torch.nn.Conv2d(fpn_dims[1] + adapter_extra_channels, inter_dims[2], 1)
         self.adapter3 = torch.nn.Conv2d(fpn_dims[2], inter_dims[3], 1)
 
         for m in self.modules():
@@ -150,38 +157,66 @@ class MaskHeadSmallConvDefault(nn.Module):
 
     # x -> compressed ch backbone feats bbox_masks -> attention maps computed at each level fpn_feat -> Highest spatial res feature from the
     # backbone that in this case is not use by the transformer encoder, so we need to reduce channels
-    def forward(self, compressed_backbone_feats, bbox_mask, fpn_feat, instances_per_batch):
+    def forward(self, compressed_backbone_feats, bbox_mask, fpn_feat, instances_per_batch, extra_feat=None):
+
+        multi_scale_att_maps = isinstance(bbox_mask, list)
+        init_bbox_mask = bbox_mask[0] if multi_scale_att_maps else bbox_mask
+
+
 
         # H/64 W/64 or H/32 W/32
         expanded_feats = expand_multi_length(compressed_backbone_feats, instances_per_batch)
-        x = torch.cat([expanded_feats, bbox_mask], 1)
+        x = torch.cat([expanded_feats, init_bbox_mask], 1)
         x = self.lay1(x)
         x = self.gn1(x)
         x = F.relu(x)
+        if self.extra_feat_dim and extra_feat is not None:
+            extra_feat = expand_multi_length(extra_feat, instances_per_batch)
+            x = x + extra_feat
         x = self.lay2(x)
         x = self.gn2(x)
         x = F.relu(x)
 
         # H/16 W/16
-        cur_fpn = self.adapter1(fpn_feat[1])
-        if cur_fpn.size(0) != x.size(0):
-            cur_fpn = expand_multi_length(cur_fpn, instances_per_batch)
+        if multi_scale_att_maps and not self.concat_on_layer:
+            cur_fpn = fpn_feat[0]
+            if cur_fpn.size(0) != x.size(0):
+                cur_fpn = expand_multi_length(cur_fpn, instances_per_batch)
+            cur_fpn = self.adapter1(torch.cat([cur_fpn, bbox_mask[1]], 1))
+
+        else:
+            cur_fpn = self.adapter1(fpn_feat[0])
+            if cur_fpn.size(0) != x.size(0):
+                cur_fpn = expand_multi_length(cur_fpn, instances_per_batch)
+
         x = cur_fpn + F.interpolate(x, size=cur_fpn.shape[-2:], mode="nearest")
+        if multi_scale_att_maps and self.concat_on_layer:
+            x = torch.cat([x, bbox_mask[1]], 1)
         x = self.lay3(x)
         x = self.gn3(x)
         x = F.relu(x)
 
         # H/8 W/8
-        cur_fpn = self.adapter2(fpn_feat[2])
-        if cur_fpn.size(0) != x.size(0):
-            cur_fpn = expand_multi_length(cur_fpn, instances_per_batch)
+        if multi_scale_att_maps and not self.concat_on_layer:
+            cur_fpn = fpn_feat[1]
+            if cur_fpn.size(0) != x.size(0):
+                cur_fpn = expand_multi_length(cur_fpn, instances_per_batch)
+            cur_fpn = self.adapter2(torch.cat([cur_fpn, bbox_mask[2]], 1))
+
+        else:
+            cur_fpn = self.adapter2(fpn_feat[1])
+            if cur_fpn.size(0) != x.size(0):
+                cur_fpn = expand_multi_length(cur_fpn, instances_per_batch)
+
         x = cur_fpn + F.interpolate(x, size=cur_fpn.shape[-2:], mode="nearest")
+        if multi_scale_att_maps and self.concat_on_layer:
+            x = torch.cat([x, bbox_mask[2]], 1)
         x = self.lay4(x)
         x = self.gn4(x)
         x = F.relu(x)
 
         # H/4 W/4
-        cur_fpn = self.adapter3(fpn_feat[3])
+        cur_fpn = self.adapter3(fpn_feat[2])
         if cur_fpn.size(0) != x.size(0):
             cur_fpn = expand_multi_length(cur_fpn, instances_per_batch)
         x = cur_fpn + F.interpolate(x, size=cur_fpn.shape[-2:], mode="nearest")
