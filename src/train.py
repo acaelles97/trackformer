@@ -32,18 +32,21 @@ ex.add_named_config('mots20', root_dir + '/cfgs/train_mots20.yaml')
 ex.add_named_config('coco_person_masks', root_dir + '/cfgs/train_coco_person_masks.yaml')
 ex.add_named_config('full_res', root_dir + '/cfgs/train_full_res.yaml')
 ex.add_named_config('focal_loss', root_dir + '/cfgs/train_focal_loss.yaml')
-ex.add_named_config('inst_segmentation', root_dir + '/cfgs/train_coco_inst_segmentation.yaml')
+ex.add_named_config('inst_segmentation', root_dir + '/cfgs/train_deformable_inst_segm.yaml')
 ex.add_named_config('finetune_transformer', root_dir + '/cfgs/train_finetune_inst_segm.yaml')
 
 
-def print_training_params(model_without_ddp, args, unfreeze_schedule):
+def print_training_params(model_without_ddp, args):
     for n, p in model_without_ddp.named_parameters():
-        if not match_name_keywords(n, args.lr_backbone_names + args.lr_linear_proj_names + [
-            'layers_track_attention'] + list(unfreeze_schedule.keys())) and p.requires_grad:
+        if not match_name_keywords(n, args.lr_backbone_names + args.lr_linear_proj_names + ['layers_track_attention'] + args.lr_encoder_names
+                                      + args.lr_decoder_names) and p.requires_grad:
             print(f"{n} lr: {args.lr}")
 
-        if match_name_keywords(n, unfreeze_schedule.keys()) and p.requires_grad:
-            print(f"{n} lr: {args.lr * args.lr_transformer_mult}")
+        if match_name_keywords(n, args.lr_encoder_names) and p.requires_grad:
+            print(f"{n} lr: {args.lr * args.lr_encoder_mult}")
+
+        if match_name_keywords(n, args.lr_decoder_names) and p.requires_grad:
+            print(f"{n} lr: {args.lr * args.lr_decoder_mult}")
 
         if match_name_keywords(n, args.lr_backbone_names) and p.requires_grad:
             print(f"{n} lr: {args.lr_backbone}")
@@ -107,70 +110,26 @@ def train(args: Namespace) -> None:
             model, device_ids=[args.gpu], find_unused_parameters=True)
         model_without_ddp = model.module
 
-    unfreeze_schedule = {param[0]: param[1] for param in args.lr_transformer_names}
-
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('NUM TRAINABLE MODEL PARAMS:', n_parameters)
-    print_training_params(model_without_ddp, args, unfreeze_schedule)
-
-    # self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.model.parameters()), lr=self.learning_rate,
-    #                                   weight_decay=self.penalty)
-
-    # def filter_func_1(param_name):
-    #     param, name = param_name[1], param_name[0]
-    #     if param.requires_grad and not match_name_keywords(name, args.lr_backbone_names + args.lr_linear_proj_names + [
-    #         'layers_track_attention'] + list(unfreeze_schedule.keys())):
-    #         return True
-    #     return False
-    #
-    # def filter_func_2(param_name):
-    #     param, name = param_name[1], param_name[0]
-    #     if param.requires_grad and match_name_keywords(name, unfreeze_schedule.keys()):
-    #         return True
-    #     return False
-    #
-    # def filter_func_3(param_name):
-    #     param, name = param_name[1], param_name[0]
-    #     if param.requires_grad and match_name_keywords(name, args.lr_backbone_names):
-    #         return True
-    #     return False
-    #
-    # def filter_func_4(param_name):
-    #     param, name = param_name[1], param_name[0]
-    #     if param.requires_grad and match_name_keywords(name, args.lr_linear_proj_names):
-    #         return True
-    #     return False
-    #
-    # param_dicts = [{"params": [a[1] for a in filter(filter_func_1, model_without_ddp.named_parameters())],
-    #                 "lr": args.lr},
-    #
-    #                {"params": [a[1] for a in filter(filter_func_2, model_without_ddp.named_parameters())],
-    #                 "lr": args.lr * args.lr_transformer_mult},
-    #
-    #                {"params": [a[1] for a in filter(filter_func_3, model_without_ddp.named_parameters())],
-    #                 "lr": args.lr_backbone},
-    #
-    #                {"params": [a[1] for a in filter(filter_func_4, model_without_ddp.named_parameters())],
-    #                 "lr": args.lr * args.lr_linear_proj_mult}
-    #                ]
+    print_training_params(model_without_ddp, args)
 
     param_dicts = [
-        {"params": [p for n, p in model_without_ddp.named_parameters()
-                    if not match_name_keywords(n, args.lr_backbone_names + args.lr_linear_proj_names +
-                                               ['layers_track_attention'] + list(unfreeze_schedule.keys())) and p.requires_grad],
+        {"params": [p for n, p in model_without_ddp.named_parameters() if
+                    not match_name_keywords(n, args.lr_backbone_names + args.lr_linear_proj_names +
+                                            ['layers_track_attention'] + args.lr_encoder_names + args.lr_decoder_names) and p.requires_grad],
          "lr": args.lr, },
 
-        # {"params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, unfreeze_schedule.keys())],
-        #  "lr": args.lr * args.lr_transformer_mult},
+        {"params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_encoder_names) and p.requires_grad],
+         "lr": args.lr * args.lr_encoder_mult},
 
-        {"params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, unfreeze_schedule.keys()) and p.requires_grad],
-         "lr": args.lr * args.lr_transformer_mult},
+        {"params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_decoder_names) and p.requires_grad],
+         "lr": args.lr * args.lr_decoder_mult},
 
-        {"params": [p for n, p in model_without_ddp.named_parameters()
-                    if match_name_keywords(n, args.lr_backbone_names) and p.requires_grad],
+        {"params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_backbone_names) and p.requires_grad],
          "lr": args.lr_backbone},
-        {"params": [p for n, p in model_without_ddp.named_parameters()
-                    if match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
+
+        {"params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
          "lr": args.lr * args.lr_linear_proj_mult}]
 
     if args.track_attention:
@@ -219,7 +178,6 @@ def train(args: Namespace) -> None:
             checkpoint = torch.load(args.resume, map_location='cpu')
 
         model_state_dict = model_without_ddp.state_dict()
-        checkpoint_state_dict = checkpoint['model']
         checkpoint_state_dict = {
             k.replace('detr.', ''): v for k, v in checkpoint['model'].items()}
 
@@ -325,18 +283,6 @@ def train(args: Namespace) -> None:
         # TRAIN
         if args.distributed:
             sampler_train.set_epoch(epoch)
-
-        # if unfreeze_schedule:
-        #     show_params = False
-        #     for param_name, param_epoch in unfreeze_schedule.items():
-        #         if epoch == param_epoch:
-        #             show_params = True
-        #             print(f"UNFREEZING {param_name}")
-        #             for n, p in model_without_ddp.named_parameters():
-        #                 if match_name_keywords(n, [param_name]):
-        #                     p.requires_grad_(True)
-        #     if show_params:
-        #         print_training_params(model_without_ddp, args, unfreeze_schedule)
 
         train_one_epoch(
             model, criterion, postprocessors, data_loader_train, optimizer, device, epoch,

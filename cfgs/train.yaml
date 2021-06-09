@@ -1,6 +1,8 @@
 lr: 0.0001
-lr_transformer_names: []
-lr_transformer_mult: 0.1
+lr_encoder_names: []
+lr_encoder_mult: 0.1
+lr_decoder_names: []
+lr_decoder_mult: 0.1
 lr_backbone_names: ['backbone.0']
 lr_backbone: 0.00001
 lr_linear_proj_names: ['reference_points', 'sampling_offsets']
@@ -60,14 +62,15 @@ track_query_noise: 0.0
 track_attention: false
 # Segmentation
 masks: false
-inst_segm_module: null
 top_k_inference: 100
-fill_batch: false
-batch_mode: false
-attention_map_lvl: 1
-deformable_used_res: [0,1,2,3]
-mask_head_used_res: [0,2,3]
-use_encoded_feats: false
+# Available features:
+# compressed_backbone -> features from backbone already compressed, used as input of the encoder
+# backbone -> features directly extractred from the backbone
+# encoded -> features from the output of the transformer encoder
+only_positive_matches: false
+att_maps_used_res: ["/32"]
+mask_head_used_features: [["/32", "compressed_backbone"], ["/16", "backbone"], ["/8", "backbone"], ["/4", "backbone"]]
+use_deformable_conv: false
 # Matcher
 # Class coefficient in the matching cost
 set_cost_class: 1.0

@@ -1,0 +1,14 @@
+dataset: coco
+coco_path: /usr/prakt/p028/data/COCO
+resume: /usr/prakt/p028/projects/Trackformer/trackformer/models/r50_deformable_detr-checkpoint.pth
+freeze_detr: true
+aux_loss: false
+masks: true
+only_positive_matches: true
+top_k_inference: 40
+att_maps_used_res: ['/32', '/16', '/8']
+use_deformable_conv: true
+mask_head_used_features: [['/32', 'encoded'], ['/16', 'encoded'], ['/8', 'encoded'], ['/4', 'backbone']]
+lr_linear_proj_names: []
+lr_backbone_names: []
+resume_shift_neuron: true

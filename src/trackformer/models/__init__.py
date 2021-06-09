@@ -11,7 +11,6 @@ from .detr_segmentation import (DeformableDETRSegm, DeformableDETRSegmTracking,
 from .detr_tracking import DeformableDETRTracking, DETRTracking
 from .matcher import build_matcher
 from .transformer import build_transformer
-from .inst_segm_deformable_detr import build_instance_segm_model
 
 
 def build_model(args):
@@ -41,19 +40,15 @@ def build_model(args):
         'matcher': matcher, }
 
     mask_kwargs = {
+        'only_positive_matches': args.only_positive_matches,
         'freeze_detr': args.freeze_detr,
-
-        'trainable_params': [param[0] for param in args.lr_transformer_names] + args.lr_backbone_names,
+        'trainable_params': args.lr_encoder_names + args.lr_decoder_names + args.lr_backbone_names,
         'top_k_predictions': args.top_k_inference,
-        'fill_batch': args.fill_batch,
-        'batch_mode': args.batch_mode,
-        'attention_map_lvl': args.attention_map_lvl,
-        "deformable_used_res": args.deformable_used_res,
-        "mask_head_used_res":  args.mask_head_used_res,
-        "use_encoded_feats": args.use_encoded_feats,
-        'matcher': matcher, }
-    # mask_kwargs = {
-    #     'freeze_detr': args.freeze_detr}
+        'matcher': matcher,
+        "mask_head_used_features": args.mask_head_used_features,
+        "att_maps_used_res": args.att_maps_used_res,
+        "use_deformable_conv": args.use_deformable_conv,
+         }
 
     if args.deformable:
         transformer = build_deforamble_transformer(args)
@@ -69,10 +64,7 @@ def build_model(args):
             else:
                 model = DeformableDETRTracking(tracking_kwargs, detr_kwargs)
         else:
-            if args.inst_segm_module:
-                model = build_instance_segm_model(args.inst_segm_module, mask_kwargs, detr_kwargs)
-
-            elif args.masks:
+            if args.masks:
                 model = DeformableDETRSegm(mask_kwargs, detr_kwargs)
             else:
                 model = DeformableDETR(**detr_kwargs)

@@ -122,7 +122,7 @@ class DETR(nn.Module):
             out['aux_outputs'] = self._set_aux_loss(
                 outputs_class, outputs_coord)
 
-        return out, targets, features, memory, hs, None, None, None, None, None
+        return out, targets, features, memory, hs, src, mask
 
     @torch.jit.unused
     def _set_aux_loss(self, outputs_class, outputs_coord):
@@ -139,6 +139,7 @@ class SetCriterion(nn.Module):
         1) we compute hungarian assignment between ground truth boxes and the outputs of the model
         2) we supervise each pair of matched ground-truth / prediction (supervise class and box)
     """
+
     def __init__(self, num_classes, matcher, weight_dict, eos_coef, losses,
                  track_query_false_positive_eos_weight, focal_loss, focal_alpha):
         """ Create the criterion.
@@ -219,7 +220,7 @@ class SetCriterion(nn.Module):
                                             dtype=src_logits.dtype, layout=src_logits.layout, device=src_logits.device)
         target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)
 
-        target_classes_onehot = target_classes_onehot[:,:,:-1]
+        target_classes_onehot = target_classes_onehot[:, :, :-1]
 
         loss_ce = sigmoid_focal_loss(src_logits, target_classes_onehot, num_boxes, alpha=self.focal_alpha, gamma=2) * src_logits.shape[1]
         losses = {'loss_ce': loss_ce}
@@ -276,17 +277,6 @@ class SetCriterion(nn.Module):
         src_masks = outputs["pred_masks"]
 
         # TODO use valid to mask invalid areas due to padding in loss
-        num_masks = num_boxes
-
-        # Check filled indices and update number of GT objects that we have in that batch
-        if "filled_indices" in outputs:
-            indices = outputs["filled_indices"]
-            num_masks = sum([len(idx[0]) for idx in indices])
-            num_masks = torch.as_tensor([num_masks], dtype=torch.float, device=next(iter(outputs.values())).device)
-            if is_dist_avail_and_initialized():
-                torch.distributed.all_reduce(num_masks)
-            num_masks = torch.clamp(num_masks / get_world_size(), min=1).item()
-
         tgt_idx = self._get_tgt_permutation_idx(indices)
         target_masks, _ = nested_tensor_from_tensor_list([t["masks"] for t in targets]).decompose()
         target_masks = target_masks.to(src_masks)
@@ -295,19 +285,16 @@ class SetCriterion(nn.Module):
         # upsample predictions to the target size
         target_masks = target_masks[tgt_idx].flatten(1)
 
-        if "indices" in outputs:
-            src_masks = interpolate(src_masks, size=target_res, mode="bilinear", align_corners=False)
-
-        else:
+        if "indices" not in outputs:
             src_idx = self._get_src_permutation_idx(indices)
-            src_masks = src_masks[src_idx]
-            src_masks = interpolate(src_masks[:, None], size=target_res, mode="bilinear", align_corners=False)
+            src_masks = src_masks[src_idx].unsqueeze(1)
 
+        src_masks = interpolate(src_masks, size=target_res, mode="bilinear", align_corners=False)
         src_masks = src_masks[:, 0].flatten(1)
 
         losses = {
-            "loss_mask": sigmoid_focal_loss(src_masks, target_masks, num_masks),
-            "loss_dice": dice_loss(src_masks, target_masks, num_masks),
+            "loss_mask": sigmoid_focal_loss(src_masks, target_masks, num_boxes),
+            "loss_dice": dice_loss(src_masks, target_masks, num_boxes),
         }
         return losses
 

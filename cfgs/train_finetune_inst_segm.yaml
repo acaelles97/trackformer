@@ -1,7 +1,9 @@
-lr_transformer_names: [['transformer.encoder', 1],['transformer.decoder', 1],]
-mask_loss_coef: 6
-dice_loss_coef: 6
+lr_encoder_names: ["transformer.encoder"]
+lr_encoder_mult: 0.5
+lr_decoder_names: ["transformer.decoder"]
+lr_decoder_mult: 0.1
+mask_loss_coef: 20
+dice_loss_coef: 20
 lr_linear_proj_names: []
-lr_transformer_mult: 0.1
 lr_backbone_names: []
 lr_backbone: 0.00002
